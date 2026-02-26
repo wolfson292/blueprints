@@ -1,0 +1,136 @@
+blueprint:
+  name: Sensor-triggered light with resettable off-delay and cooldown (seconds)
+  description: >
+    Turns on a light when any configured sensor triggers.
+    Turns off automatically after a configurable delay that resets on retrigger.
+    After the light turns off (manually or automatically), it will not turn on again
+    until the cooldown period (in seconds) has passed.
+
+  domain: automation
+
+  input:
+    trigger_sensors:
+      name: Trigger sensors
+      description: Binary sensors that trigger the light (motion, door, occupancy, etc.)
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+
+    target_light:
+      name: Light or switch to control
+      selector:
+        target:
+          entity:
+            domain:
+              - light
+              - switch
+
+    off_delay_seconds:
+      name: Auto-off delay (seconds)
+      description: Time after last trigger before turning off
+      default: 300
+      selector:
+        number:
+          min: 1
+          max: 86400
+          step: 1
+          unit_of_measurement: seconds
+          mode: box
+
+    cooldown_seconds:
+      name: Cooldown period (seconds)
+      description: Time after the light turns off before it can turn on again
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 86400
+          step: 1
+          unit_of_measurement: seconds
+          mode: box
+
+mode: restart
+max_exceeded: silent
+
+variables:
+
+  off_delay: !input off_delay_seconds
+  cooldown: !input cooldown_seconds
+
+  light_entity: >
+    {{ expand(!input target_light)
+       | map(attribute='entity_id')
+       | list
+       | first }}
+
+trigger:
+
+  - platform: state
+    entity_id: !input trigger_sensors
+    to: "on"
+    id: sensor_trigger
+
+  - platform: state
+    entity_id: !input target_light
+    to: "off"
+    id: light_turned_off
+
+
+condition: []
+
+
+action:
+
+  - choose:
+
+      ###########################################
+      # SENSOR TRIGGERED
+      ###########################################
+
+      - conditions:
+          - condition: trigger
+            id: sensor_trigger
+
+        sequence:
+
+          # Enforce cooldown if light is currently OFF
+          - condition: template
+            value_template: >
+              {% if states(light_entity) == 'on' %}
+                true
+              {% else %}
+                {% set last = states[light_entity].last_changed %}
+                {{ cooldown == 0 or (as_timestamp(now()) - as_timestamp(last)) >= cooldown }}
+              {% endif %}
+
+          - service: homeassistant.turn_on
+            target: !input target_light
+
+          # Restart-safe delay
+          - delay:
+              seconds: "{{ off_delay }}"
+
+          # Only turn off if still on
+          - condition: template
+            value_template: "{{ states(light_entity) == 'on' }}"
+
+          - service: homeassistant.turn_off
+            target: !input target_light
+
+
+      ###########################################
+      # LIGHT TURNED OFF
+      ###########################################
+
+      - conditions:
+          - condition: trigger
+            id: light_turned_off
+
+        sequence:
+          # No action required.
+          # Cooldown enforced via last_changed timestamp.
+          - stop: Cooldown started
+
+
+    default: []
